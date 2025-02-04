@@ -1,32 +1,23 @@
-from typing import List, Dict, Any
-
-import lorem
-import math
+import asyncio
 import itertools
-import asyncio
 import json
-import uuid
-import asyncio
+import math
 import os
-import time
 import random
-
+import time
+import uuid
 from collections import deque
 from datetime import datetime, timedelta
+from typing import Any, Dict, List
 
+import lorem
 from dotenv import load_dotenv
-
-from fastapi import FastAPI, Request, status, HTTPException, Depends, Header
-from fastapi.responses import StreamingResponse, Response
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
-
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-
 
 TOKENS_TO_WORDS_APPROX = 0.58
 TOKEN_CHUNK_SIZE = 4
@@ -553,8 +544,6 @@ async def generate_content(request: Request, authorization: str = Header(None)):
     return response
 
 
-import random
-
 request_counter = 0
 
 
@@ -779,11 +768,12 @@ async def traces(request: Request):
 
 
 import gzip
-import io
 
 
 @app.post("/api/v2/logs")
 async def logs(request: Request):
+    await asyncio.sleep(60)  # Wait for 1 second
+    return {"status": "done"}
     start_time = time.perf_counter()
 
     # Check if the content is gzipped
@@ -1013,6 +1003,42 @@ async def completion_anthropic(request: Request):
 
     await asyncio.sleep(latency_e2e)
     return response
+
+
+seen_langfuse_request_ids = set()
+
+
+@app.post("/api/public/ingestion")
+async def ingestion(request: Request):
+    try:
+        global seen_langfuse_request_ids
+        data = await request.json()
+
+        # Extract request IDs from the batch
+        for item in data.get("batch", []):
+            if item.get("type") == "generation-create":
+                full_request_id = item.get("body", {}).get("id")
+                if full_request_id and "_" in full_request_id:
+                    # Split on underscore and take the second part (the chatcmpl ID)
+                    clean_request_id = full_request_id.split("_")[1]
+                    seen_langfuse_request_ids.add(clean_request_id)
+
+        print(
+            f"Stored request IDs (total: {len(seen_langfuse_request_ids)}): {seen_langfuse_request_ids}"
+        )
+        await asyncio.sleep(1)  # Original delay
+        return {"status": "done", "stored_ids_count": len(seen_langfuse_request_ids)}
+
+    except Exception as e:
+        print(f"Error processing ingestion request: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error processing request: {str(e)}"
+        )
+
+
+@app.get("/langfuse/trace/{request_id}")
+async def has_request_id(request_id: str):
+    return {"exists": request_id in seen_langfuse_request_ids, "request_id": request_id}
 
 
 if __name__ == "__main__":
