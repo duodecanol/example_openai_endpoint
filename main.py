@@ -146,12 +146,14 @@ async def data_generator(*, response_id: str, model: str, max_words: int = 100):
     "/openai/deployments/{model:path}/chat/completions"
 )  # azure compatible endpoint
 async def completion(request: Request):
+
     _time_to_sleep = os.getenv("TIME_TO_SLEEP", None)
     if _time_to_sleep is not None:
         print("sleeping for " + _time_to_sleep)
         await asyncio.sleep(float(_time_to_sleep))
 
     data = await request.json()
+    print(data)
     model = data.get("model", "gpt-3.5-turbo-0125")
 
     max_tokens = data.get("max_tokens", 100)
@@ -958,6 +960,7 @@ async def data_generator_anthropic(*, model: str, max_words: int = 100):
 @app.post("/v1/messages")
 async def completion_anthropic(request: Request):
     data = await request.json()
+    print(data)
 
     model = data.get("model", "claude-3-opus-20240229")
 
