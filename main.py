@@ -1,7 +1,8 @@
-from fastapi import FastAPI, Request, status, HTTPException, Depends, Header
-from fastapi.responses import StreamingResponse, Response
-from fastapi.security import OAuth2PasswordBearer
-from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Dict, Any
+
+import lorem
+import math
+import itertools
 import asyncio
 import json
 import uuid
@@ -9,16 +10,25 @@ import asyncio
 import os
 import time
 import random
-from dotenv import load_dotenv
-from slowapi import Limiter
+
 from collections import deque
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+
+from dotenv import load_dotenv
+
+from fastapi import FastAPI, Request, status, HTTPException, Depends, Header
+from fastapi.responses import StreamingResponse, Response
+from fastapi.security import OAuth2PasswordBearer
+from fastapi.middleware.cors import CORSMiddleware
+
 from pydantic import BaseModel
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+
+
+TOKENS_TO_WORDS_APPROX = 0.58
 
 
 def get_request_url(request: Request):
@@ -757,23 +767,95 @@ async def get_slack_history():
     return list(slack_requests)
 
 
-def data_generator_anthropic():
-    response_id = uuid.uuid4().hex
-    sentence = "Hello this is a test response from a fixed OpenAI endpoint."
-    words = sentence.split(" ")
-    for word in words:
-        word = word + " "
-        chunk = {
-            "id": f"chatcmpl-{response_id}",
-            "object": "chat.completion.chunk",
-            "created": 1677652288,
-            "model": "gpt-3.5-turbo-0125",
-            "choices": [{"index": 0, "delta": {"content": word}}],
-        }
-        try:
-            yield f"data: {json.dumps(chunk.dict())}\n\n"
-        except:
-            yield f"data: {json.dumps(chunk)}\n\n"
+def data_generator_anthropic_wrapper(generator):
+    def decorated(*args, **kwargs):
+        print(f"args: {args}, kwargs: {kwargs}")
+        generator_instance = generator(*args, **kwargs)
+        model = kwargs.get("model", "claude-3-5-sonnet-20240620")
+        max_words = kwargs.get("max_words", 100)
+        stream_events_head = (
+            {
+                "event": "message_start",
+                "data": {
+                    "type": "message_start",
+                    "message": {
+                        "id": f"msg_{uuid.uuid4().hex}",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": model,
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {
+                            "input_tokens": random.randint(10, 900),
+                            "output_tokens": 1,
+                        },
+                    },
+                },
+            },
+            {
+                "event": "content_block_start",
+                "data": {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            },
+            {"event": "ping", "data": {"type": "ping"}},
+        )
+        stream_events_tail = (
+            {
+                "event": "content_block_stop",
+                "data": {"type": "content_block_stop", "index": 0},
+            },
+            {
+                "event": "message_delta",
+                "data": {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": int(max_words / TOKENS_TO_WORDS_APPROX)},
+                },
+            },
+            {"event": "message_stop", "data": {"type": "message_stop"}},
+        )
+
+        async def _inner():
+            for event in stream_events_head:
+                await asyncio.sleep(0.03)
+                yield f"event: {event['event']}\ndata: {json.dumps(event['data'])}\n\n"
+
+            async for data in generator_instance:
+                yield data
+
+            for event in stream_events_tail:
+                await asyncio.sleep(0.03)
+                yield f"event: {event['event']}\ndata: {json.dumps(event['data'])}\n\n"
+
+        return _inner()
+
+    return decorated
+
+
+@data_generator_anthropic_wrapper
+async def data_generator_anthropic(*, model: str, max_words: int = 100):
+    words_consumed = 0
+    while words_consumed < max_words:
+        words_count = min(random.randint(7, 55), max_words - words_consumed)
+        sentence = lorem.get_sentence(word_range=(words_count, words_count + 2))
+
+        batched_words = itertools.batched(sentence.split(" "), 5)
+        for batch in batched_words:
+            chunk = " ".join(batch) + " "
+            data = {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": chunk},
+            }
+            yield f"event: content_block_delta\ndata: {json.dumps(data)}\n\n"
+
+            await asyncio.sleep(random.random() * 0.1)
+
+        words_consumed += words_count
 
 
 # for completion
@@ -781,9 +863,27 @@ def data_generator_anthropic():
 async def completion_anthropic(request: Request):
     data = await request.json()
 
-    if data.get("stream") == True:
+    model = data.get("model", "claude-3-opus-20240229")
+
+    max_tokens = data.get("max_tokens", 100)
+    if max_tokens < 1:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "max_tokens: must be greater than or equal to 1",
+                },
+            },
+        )
+    max_words = int(max_tokens * TOKENS_TO_WORDS_APPROX)
+    jitter = random.randint(2, max(int(max_words // 5), 10))
+    latency_e2e = math.log(max(2, max_words)) * 0.98
+
+    if data.get("stream") is True:
         return StreamingResponse(
-            content=data_generator_anthropic(),
+            content=data_generator_anthropic(model=model, max_words=max_words),
             media_type="text/event-stream",
         )
     else:
@@ -794,15 +894,18 @@ async def completion_anthropic(request: Request):
             "content": [
                 {
                     "type": "text",
-                    "text": "I'm sorry, but the string of characters \"123450000s0 p kk\" doesn't appear to have any clear meaning or context. It seems to be a random combination of numbers and letters. If you could provide more information or clarify what you're trying to communicate, I'll do my best to assist you.",
+                    "text": lorem.get_sentence(
+                        word_range=(max_words - jitter, max_words + jitter)
+                    ),
                 }
             ],
-            "model": "claude-3-opus-20240229",
+            "model": model,
             "stop_reason": "end_turn",
             "stop_sequence": None,
             "usage": {"input_tokens": 17, "output_tokens": 71},
         }
 
+        await asyncio.sleep(latency_e2e)
         return response
 
 
