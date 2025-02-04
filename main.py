@@ -29,6 +29,8 @@ from slowapi.errors import RateLimitExceeded
 
 
 TOKENS_TO_WORDS_APPROX = 0.58
+TOKEN_CHUNK_SIZE = 3
+CHUNK_MAX_DELAY = 0.2
 
 
 def get_request_url(request: Request):
@@ -50,23 +52,91 @@ app.add_middleware(
 )
 
 
-def data_generator():
-    response_id = uuid.uuid4().hex
-    sentence = "Hello this is a test response from a fixed OpenAI endpoint."
-    words = sentence.split(" ")
-    for word in words:
-        word = word + " "
-        chunk = {
-            "id": f"chatcmpl-{response_id}",
-            "object": "chat.completion.chunk",
-            "created": 1677652288,
-            "model": "gpt-3.5-turbo-0125",
-            "choices": [{"index": 0, "delta": {"content": word}}],
-        }
-        try:
-            yield f"data: {json.dumps(chunk.dict())}\n\n"
-        except:
-            yield f"data: {json.dumps(chunk)}\n\n"
+def data_generator_wrapper(generator):
+    def decorated(*args, **kwargs):
+        generator_instance = generator(*args, **kwargs)
+        response_id = kwargs.get("response_id", uuid.uuid4().hex)
+        model = kwargs.get("model", "gpt-3.5-turbo-0125")
+        max_words = kwargs.get("max_words", 100)
+
+        async def _inner():
+            data = {
+                "id": f"chatcmpl-{response_id}",
+                "object": "chat.completion.chunk",
+                "created": 1738651747,
+                "model": model,
+                "service_tier": "free",
+                "system_fingerprint": "fp_44709d6fcb",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "logprobs": None,
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(data)}\n\n"
+            await asyncio.sleep(0.03)
+
+            async for data in generator_instance:
+                yield data
+
+            data = {
+                "id": f"chatcmpl-{response_id}",
+                "object": "chat.completion.chunk",
+                "created": 1738651747,
+                "model": model,
+                "service_tier": "free",
+                "system_fingerprint": "fp_44709d6fcb",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "logprobs": None,
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(data)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return _inner()
+
+    return decorated
+
+
+@data_generator_wrapper
+async def data_generator(*, response_id: str, model: str, max_words: int = 100):
+    words_consumed = 0
+    while words_consumed < max_words:
+        words_count = min(random.randint(7, 55), max_words - words_consumed)
+        sentence = lorem.get_sentence(word_range=(words_count, words_count + 2))
+
+        batched_words = itertools.batched(sentence.split(" "), TOKEN_CHUNK_SIZE)
+        for batch in batched_words:
+            content = " ".join(batch) + " "
+            data = {
+                "id": f"chatcmpl-{response_id}",
+                "object": "chat.completion.chunk",
+                "created": 1738651747,
+                "model": model,
+                "service_tier": "free",
+                "system_fingerprint": "fp_44709d6fcb",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": content},
+                        "logprobs": None,
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(data)}\n\n"
+
+            await asyncio.sleep(random.random() * CHUNK_MAX_DELAY)
+
+        words_consumed += words_count
 
 
 # for completion
@@ -82,49 +152,75 @@ async def completion(request: Request):
         await asyncio.sleep(float(_time_to_sleep))
 
     data = await request.json()
+    model = data.get("model", "gpt-3.5-turbo-0125")
 
-    if data.get("model") == "429":
+    max_tokens = data.get("max_tokens", 100)
+    if max_tokens < 1:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": "Invalid 'max_tokens': integer below minimum value. Expected a value >= 1, but got 0 instead.",
+                    "type": "invalid_request_error",
+                    "param": "max_tokens",
+                    "code": "integer_below_min_value",
+                }
+            },
+        )
+    max_words = int(max_tokens * TOKENS_TO_WORDS_APPROX)
+    jitter = random.randint(2, max(int(max_words // 5), 10))
+    latency_e2e = math.log(max(2, max_words)) * 0.45
+
+    response_id = uuid.uuid4().hex
+
+    if model == "429":
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many requests"
         )
 
-    if data.get("model") == "random_sleep":
+    if model == "random_sleep":
         # sleep for a random time between 1 and 10 seconds
         sleep_time = random.randint(1, 10)
         print("sleeping for " + str(sleep_time) + " seconds")
         await asyncio.sleep(sleep_time)
-    if data.get("stream") == True:
+
+    if data.get("stream") is True:
         return StreamingResponse(
-            content=data_generator(),
+            content=data_generator(
+                response_id=response_id, model=model, max_words=max_words
+            ),
             media_type="text/event-stream",
         )
+
+    _model = data.get("model")
+    if _model == "gpt-5":
+        _model = "gpt-12"
     else:
-        _model = data.get("model")
-        if _model == "gpt-5":
-            _model = "gpt-12"
-        else:
-            _model = "gpt-3.5-turbo-0301"
-        response_id = uuid.uuid4().hex
-        response = {
-            "id": f"chatcmpl-{response_id}",
-            "object": "chat.completion",
-            "created": 1677652288,
-            "model": _model,
-            "system_fingerprint": "fp_44709d6fcb",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "\n\nHello there, how may I assist you today?",
-                    },
-                    "logprobs": None,
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {"prompt_tokens": 9, "completion_tokens": 12, "total_tokens": 21},
-        }
-        return response
+        _model = "gpt-3.5-turbo-0301"
+
+    response = {
+        "id": f"chatcmpl-{response_id}",
+        "object": "chat.completion",
+        "created": 1677652288,
+        "model": _model,
+        "system_fingerprint": "fp_44709d6fcb",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": lorem.get_sentence(
+                        word_range=(max_words - jitter, max_words + jitter)
+                    ),
+                },
+                "logprobs": None,
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 9, "completion_tokens": 12, "total_tokens": 21},
+    }
+    await asyncio.sleep(latency_e2e)
+    return response
 
 
 # for completion
@@ -843,17 +939,17 @@ async def data_generator_anthropic(*, model: str, max_words: int = 100):
         words_count = min(random.randint(7, 55), max_words - words_consumed)
         sentence = lorem.get_sentence(word_range=(words_count, words_count + 2))
 
-        batched_words = itertools.batched(sentence.split(" "), 5)
+        batched_words = itertools.batched(sentence.split(" "), TOKEN_CHUNK_SIZE)
         for batch in batched_words:
-            chunk = " ".join(batch) + " "
+            content = " ".join(batch) + " "
             data = {
                 "type": "content_block_delta",
                 "index": 0,
-                "delta": {"type": "text_delta", "text": chunk},
+                "delta": {"type": "text_delta", "text": content},
             }
             yield f"event: content_block_delta\ndata: {json.dumps(data)}\n\n"
 
-            await asyncio.sleep(random.random() * 0.1)
+            await asyncio.sleep(random.random() * CHUNK_MAX_DELAY)
 
         words_consumed += words_count
 
@@ -886,30 +982,30 @@ async def completion_anthropic(request: Request):
             content=data_generator_anthropic(model=model, max_words=max_words),
             media_type="text/event-stream",
         )
-    else:
-        response = {
-            "id": "msg_01G7MsdWPT2JZMUuc1UXRavn",
-            "type": "message",
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "text",
-                    "text": lorem.get_sentence(
-                        word_range=(max_words - jitter, max_words + jitter)
-                    ),
-                }
-            ],
-            "model": model,
-            "stop_reason": "end_turn",
-            "stop_sequence": None,
-            "usage": {"input_tokens": 17, "output_tokens": 71},
-        }
 
-        await asyncio.sleep(latency_e2e)
-        return response
+    response = {
+        "id": "msg_01G7MsdWPT2JZMUuc1UXRavn",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "text",
+                "text": lorem.get_sentence(
+                    word_range=(max_words - jitter, max_words + jitter)
+                ),
+            }
+        ],
+        "model": model,
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 17, "output_tokens": 71},
+    }
+
+    await asyncio.sleep(latency_e2e)
+    return response
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8090)
+    uvicorn.run("main:app", host="0.0.0.0", port=8090, reload=True)
