@@ -30,7 +30,6 @@ from slowapi.errors import RateLimitExceeded
 
 TOKENS_TO_WORDS_APPROX = 0.58
 TOKEN_CHUNK_SIZE = 4
-CHUNK_MAX_DELAY = 0.1
 
 
 def get_request_url(request: Request):
@@ -109,6 +108,10 @@ def data_generator_wrapper(generator):
 @data_generator_wrapper
 async def data_generator(*, response_id: str, model: str, max_words: int = 100):
     words_consumed = 0
+
+    latency_e2e = math.log(max(2, max_words)) * 1.01
+    chunk_max_delay = latency_e2e / max_words
+
     while words_consumed < max_words:
         words_count = min(random.randint(7, 55), max_words - words_consumed)
         sentence = lorem.get_sentence(word_range=(words_count, words_count + 2))
@@ -134,7 +137,7 @@ async def data_generator(*, response_id: str, model: str, max_words: int = 100):
             }
             yield f"data: {json.dumps(data)}\n\n"
 
-            await asyncio.sleep(random.random() * CHUNK_MAX_DELAY)
+            await asyncio.sleep(random.random() * chunk_max_delay * 2)
 
         words_consumed += words_count
 
@@ -146,7 +149,6 @@ async def data_generator(*, response_id: str, model: str, max_words: int = 100):
     "/openai/deployments/{model:path}/chat/completions"
 )  # azure compatible endpoint
 async def completion(request: Request):
-
     _time_to_sleep = os.getenv("TIME_TO_SLEEP", None)
     if _time_to_sleep is not None:
         print("sleeping for " + _time_to_sleep)
@@ -937,7 +939,12 @@ def data_generator_anthropic_wrapper(generator):
 @data_generator_anthropic_wrapper
 async def data_generator_anthropic(*, model: str, max_words: int = 100):
     words_consumed = 0
+
+    latency_e2e = math.log(max(2, max_words)) * 1.45
+    chunk_max_delay = latency_e2e / max_words
+
     while words_consumed < max_words:
+        # print(f"words_consumed: {words_consumed}, max_words: {max_words}")
         words_count = min(random.randint(7, 55), max_words - words_consumed)
         sentence = lorem.get_sentence(word_range=(words_count, words_count + 2))
 
@@ -951,7 +958,7 @@ async def data_generator_anthropic(*, model: str, max_words: int = 100):
             }
             yield f"event: content_block_delta\ndata: {json.dumps(data)}\n\n"
 
-            await asyncio.sleep(random.random() * CHUNK_MAX_DELAY)
+            await asyncio.sleep(random.random() * chunk_max_delay * 3)
 
         words_consumed += words_count
 
