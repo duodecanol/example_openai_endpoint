@@ -29,8 +29,8 @@ from slowapi.errors import RateLimitExceeded
 
 
 TOKENS_TO_WORDS_APPROX = 0.58
-TOKEN_CHUNK_SIZE = 3
-CHUNK_MAX_DELAY = 0.2
+TOKEN_CHUNK_SIZE = 4
+CHUNK_MAX_DELAY = 0.1
 
 
 def get_request_url(request: Request):
