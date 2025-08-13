@@ -772,8 +772,6 @@ import gzip
 
 @app.post("/api/v2/logs")
 async def logs(request: Request):
-    await asyncio.sleep(60)  # Wait for 1 second
-    return {"status": "done"}
     start_time = time.perf_counter()
 
     # Check if the content is gzipped
